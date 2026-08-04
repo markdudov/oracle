@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   claim-vm:
@@ -31,9 +32,23 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Auto-Retry Script
+        id: retry
         env:
           SINGLE_RUN: "true"
           OCI_CONFIG_JSON: ${{ secrets.OCI_CONFIG_JSON }}
           OCI_API_KEY_PEM: ${{ secrets.OCI_API_KEY_PEM }}
         run: |
           python main.py
+
+      - name: Dispatch Next Run (Reliable Green Chain)
+        if: always() && steps.retry.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f /tmp/vm_created ]; then
+            echo "🎉 VM created or already exists! Stopping auto-loop."
+          else
+            echo "🔄 VM not created yet. Dispatching next workflow run..."
+            sleep 10
+            gh workflow run oracle_retry.yml --repo ${{ github.repository }}
+          fi
