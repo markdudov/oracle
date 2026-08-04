@@ -176,13 +176,13 @@ def main():
     log(f"Availability Domains ({oci_cfg['region']}): {', '.join(ads)}", "INFO")
     
     single_run = os.getenv("SINGLE_RUN") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
-    max_loops = 5 if single_run else sys.maxsize
+    max_loops = 16 if single_run else sys.maxsize
     interval = int(cfg.get("retry_interval_seconds", 600))
     
     attempt = 0
     while attempt < max_loops:
         attempt += 1
-        log(f"--- Опит #{attempt} ---", "INFO")
+        log(f"--- Опит #{attempt}/{max_loops if single_run else '∞'} ---", "INFO")
         
         for ad in ads:
             log(f"Опит за създаване на машина в AD: {ad}...", "INFO")
@@ -215,7 +215,7 @@ def main():
             log(f"Изчакване {wait_time} секунди преди следващ опит...", "INFO")
             time.sleep(wait_time)
 
-    log("Завършен цикъл на опити за този екземпляр.", "INFO")
+    log("Завършен 12-минутен цикъл на опити за този runner. Очаква се следващият график.", "INFO")
 
 if __name__ == "__main__":
     main()
