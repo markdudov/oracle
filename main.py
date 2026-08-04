@@ -13,6 +13,7 @@ except ImportError:
     sys.exit(1)
 
 CONFIG_FILE = "config.json"
+SUCCESS_MARKER = "/tmp/vm_created"
 
 def log(msg, level="INFO"):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -23,6 +24,13 @@ def log(msg, level="INFO"):
         "ERROR": "[❌ ERROR]"
     }.get(level, "[LOG]")
     print(f"{timestamp} {prefix} {msg}", flush=True)
+
+def mark_success():
+    try:
+        with open(SUCCESS_MARKER, "w") as f:
+            f.write("CREATED")
+    except Exception:
+        pass
 
 def load_config():
     if os.getenv("OCI_CONFIG_JSON"):
@@ -161,14 +169,14 @@ def main():
     existing = check_existing_instance(compute_client, compartment_ocid, display_name)
     if existing:
         log(f"🎉 Машината '{display_name}' вече съществува и е със статус {existing.lifecycle_state}! Прекратяване.", "SUCCESS")
+        mark_success()
         sys.exit(0)
     
     ads = get_availability_domains(identity_client, compartment_ocid)
     log(f"Availability Domains ({oci_cfg['region']}): {', '.join(ads)}", "INFO")
     
     single_run = os.getenv("SINGLE_RUN") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
-    max_loops = 8 if single_run else sys.maxsize
-
+    max_loops = 5 if single_run else sys.maxsize
     interval = int(cfg.get("retry_interval_seconds", 600))
     
     attempt = 0
@@ -182,6 +190,7 @@ def main():
                 created_instance = try_launch_instance(compute_client, ad, cfg)
                 log(f"🎉 УСПЕХ! Машината беше създадена успешно в {ad}!", "SUCCESS")
                 log(f"Instance ID: {created_instance.id}", "SUCCESS")
+                mark_success()
                 
                 send_notification(
                     cfg,
@@ -194,6 +203,7 @@ def main():
                     log(f"Няма капацитет в {ad} ({se.code})", "WARN")
                 elif se.status == 400 and "limit" in se.message.lower():
                     log(f"Достигнат лимит: {se.message}", "ERROR")
+                    mark_success()
                     sys.exit(1)
                 else:
                     log(f"Грешка OCI API ({ad}): {se.status} - {se.message}", "ERROR")
@@ -201,11 +211,11 @@ def main():
                 log(f"Грешка ({ad}): {e}", "ERROR")
         
         if attempt < max_loops:
-            wait_time = 60 if single_run else interval
+            wait_time = 45 if single_run else interval
             log(f"Изчакване {wait_time} секунди преди следващ опит...", "INFO")
             time.sleep(wait_time)
 
-    log("Завършен цикъл на опити. Изчакване на следващия GitHub Actions cron тригер.", "INFO")
+    log("Завършен цикъл на опити за този екземпляр.", "INFO")
 
 if __name__ == "__main__":
     main()
