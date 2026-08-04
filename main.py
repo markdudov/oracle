@@ -25,12 +25,14 @@ def log(msg, level="INFO"):
     print(f"{timestamp} {prefix} {msg}", flush=True)
 
 def load_config():
-    if not os.path.exists(CONFIG_FILE):
+    if os.getenv("OCI_CONFIG_JSON"):
+        cfg = json.loads(os.getenv("OCI_CONFIG_JSON"))
+    elif os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    else:
         log(f"Файлът '{CONFIG_FILE}' не е намерен!", "ERROR")
         sys.exit(1)
-    
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
 
     required = ["user_ocid", "tenancy_ocid", "fingerprint", "key_file_path", "subnet_ocid", "image_ocid", "ssh_public_key"]
     missing = [req for req in required if not cfg.get(req) or "СЛОЖЕТЕ_ТУК" in str(cfg[req])]
@@ -65,10 +67,17 @@ def send_notification(cfg, title, message):
             log(f"Грешка при изпращане на Discord съобщение: {e}", "WARN")
 
 def get_oci_config(cfg):
-    key_path = os.path.expanduser(cfg["key_file_path"])
-    if not os.path.exists(key_path):
-        log(f"Файлът с частния API ключ не съществува на път: {key_path}", "ERROR")
-        sys.exit(1)
+    key_pem = os.getenv("OCI_API_KEY_PEM")
+    if key_pem:
+        key_path = "/tmp/oci_api_key.pem"
+        with open(key_path, "w", encoding="utf-8") as f:
+            f.write(key_pem.strip() + "\n")
+        os.chmod(key_path, 0o600)
+    else:
+        key_path = os.path.expanduser(cfg["key_file_path"])
+        if not os.path.exists(key_path):
+            log(f"Файлът с частния API ключ не съществува на път: {key_path}", "ERROR")
+            sys.exit(1)
 
     oci_cfg = {
         "user": cfg["user_ocid"],

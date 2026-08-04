@@ -23,15 +23,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Setup OCI Credentials
-        run: |
-          mkdir -p ~/.oci
-          echo "${{ secrets.OCI_API_KEY_PEM }}" > ~/.oci/oci_api_key.pem
-          chmod 600 ~/.oci/oci_api_key.pem
-          echo "${{ secrets.OCI_CONFIG_JSON }}" > config.json
-
       - name: Run Auto-Retry Script
         env:
           SINGLE_RUN: "true"
+          OCI_CONFIG_JSON: ${{ secrets.OCI_CONFIG_JSON }}
+          OCI_API_KEY_PEM: ${{ secrets.OCI_API_KEY_PEM }}
         run: |
           python main.py
