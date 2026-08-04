@@ -34,7 +34,8 @@ def load_config():
 
     # Validate essential fields
     required = ["user_ocid", "tenancy_ocid", "fingerprint", "key_file_path", "subnet_ocid", "image_ocid", "ssh_public_key"]
-    missing = [req for req in required if not cfg.get(req) or cfg[req].startswith("ocid1...") or "aaaaaaa" in cfg[req]]
+    missing = [req for req in required if not cfg.get(req) or "СЛОЖЕТЕ_ТУК" in str(cfg[req])]
+
     
     if missing:
         log(f"Моля попълнете валидни стойности за следните полета в {CONFIG_FILE}: {', '.join(missing)}", "ERROR")
