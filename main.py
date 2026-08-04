@@ -26,16 +26,14 @@ def log(msg, level="INFO"):
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        log(f"Файлът '{CONFIG_FILE}' не е намерен! Копирайте 'config.example.json' като '{CONFIG_FILE}' и попълнете вашите OCIDs.", "ERROR")
+        log(f"Файлът '{CONFIG_FILE}' не е намерен!", "ERROR")
         sys.exit(1)
     
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    # Validate essential fields
     required = ["user_ocid", "tenancy_ocid", "fingerprint", "key_file_path", "subnet_ocid", "image_ocid", "ssh_public_key"]
     missing = [req for req in required if not cfg.get(req) or "СЛОЖЕТЕ_ТУК" in str(cfg[req])]
-
     
     if missing:
         log(f"Моля попълнете валидни стойности за следните полета в {CONFIG_FILE}: {', '.join(missing)}", "ERROR")
@@ -82,6 +80,16 @@ def get_oci_config(cfg):
     oci.config.validate_config(oci_cfg)
     return oci_cfg
 
+def check_existing_instance(compute_client, compartment_ocid, display_name):
+    try:
+        instances = compute_client.list_instances(compartment_ocid).data
+        for inst in instances:
+            if inst.display_name == display_name and inst.lifecycle_state in ["RUNNING", "PROVISIONING", "STARTING"]:
+                return inst
+    except Exception as e:
+        log(f"Проверка за съществуваща машина: {e}", "WARN")
+    return None
+
 def get_availability_domains(identity_client, compartment_ocid):
     try:
         ads_response = identity_client.list_availability_domains(compartment_ocid)
@@ -89,9 +97,8 @@ def get_availability_domains(identity_client, compartment_ocid):
         if ads:
             return ads
     except Exception as e:
-        log(f"Не успя да извлече ADs чрез API, преминаване към стандартните за Франкфурт: {e}", "WARN")
+        log(f"Не успя да извлече ADs чрез API: {e}", "WARN")
     
-    # Fallback for Frankfurt
     return [
         "gVig:EU-FRANKFURT-1-AD-1",
         "gVig:EU-FRANKFURT-1-AD-2",
@@ -139,48 +146,56 @@ def main():
     compute_client = oci.core.ComputeClient(oci_cfg)
     
     compartment_ocid = cfg.get("compartment_ocid") or cfg["tenancy_ocid"]
+    display_name = cfg.get("display_name", "oracle-arm-instance")
+
+    # Check if instance already exists
+    existing = check_existing_instance(compute_client, compartment_ocid, display_name)
+    if existing:
+        log(f"🎉 Машината '{display_name}' вече съществува и е със статус {existing.lifecycle_state}! Прекратяване.", "SUCCESS")
+        sys.exit(0)
     
-    log(f"Извличане на Availability Domains за регион {oci_cfg['region']}...", "INFO")
     ads = get_availability_domains(identity_client, compartment_ocid)
-    log(f"Намерени Availability Domains: {', '.join(ads)}", "INFO")
+    log(f"Availability Domains ({oci_cfg['region']}): {', '.join(ads)}", "INFO")
     
+    single_run = os.getenv("SINGLE_RUN") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
+    max_loops = 3 if single_run else sys.maxsize
     interval = int(cfg.get("retry_interval_seconds", 600))
-    attempt = 0
     
-    while True:
+    attempt = 0
+    while attempt < max_loops:
         attempt += 1
         log(f"--- Опит #{attempt} ---", "INFO")
         
-        created_instance = None
         for ad in ads:
             log(f"Опит за създаване на машина в AD: {ad}...", "INFO")
             try:
                 created_instance = try_launch_instance(compute_client, ad, cfg)
                 log(f"🎉 УСПЕХ! Машината беше създадена успешно в {ad}!", "SUCCESS")
                 log(f"Instance ID: {created_instance.id}", "SUCCESS")
-                log(f"Display Name: {created_instance.display_name}", "SUCCESS")
                 
                 send_notification(
                     cfg,
                     "Oracle Cloud VM Created Successfully!",
                     f"Машината '{created_instance.display_name}' беше създадена в {ad}.\nInstance ID: {created_instance.id}"
                 )
-                return
+                sys.exit(0)
             except oci.exceptions.ServiceError as se:
-                # Capacity errors / HTTP 500 / OutOfCapacity / TooManyRequests
                 if se.status in [500, 429] or "capacity" in se.message.lower() or "outofcapacity" in se.code.lower():
-                    log(f"Няма свободен капацитет в {ad} ({se.code}: {se.message.strip()})", "WARN")
+                    log(f"Няма капацитет в {ad} ({se.code})", "WARN")
                 elif se.status == 400 and "limit" in se.message.lower():
-                    log(f"Достигнат лимит на акаунта или ресурсите: {se.message}", "ERROR")
-                    send_notification(cfg, "Oracle Script Error", f"Лимит на ресурсите: {se.message}")
+                    log(f"Достигнат лимит: {se.message}", "ERROR")
                     sys.exit(1)
                 else:
-                    log(f"Грешка от OCI API при опит в {ad}: status={se.status}, code={se.code}, message={se.message}", "ERROR")
+                    log(f"Грешка OCI API ({ad}): {se.status} - {se.message}", "ERROR")
             except Exception as e:
-                log(f"Възникна непредвидена грешка при опит в {ad}: {e}", "ERROR")
+                log(f"Грешка ({ad}): {e}", "ERROR")
         
-        log(f"Всички AD-та са без свободен капацитет в момента. Изчакване {interval} секунди (10 минути)...", "INFO")
-        time.sleep(interval)
+        if attempt < max_loops:
+            wait_time = 60 if single_run else interval
+            log(f"Изчакване {wait_time} секунди преди следващ опит...", "INFO")
+            time.sleep(wait_time)
+
+    log("Завършен цикъл на опити. Изчакване на следващия GitHub Actions cron тригер.", "INFO")
 
 if __name__ == "__main__":
     main()
