@@ -1,0 +1,14 @@
+# Virtual environment
+venv/
+.venv/
+
+# Credentials & Sensitive Configs
+config.json
+*.pem
+*.key
+.env
+
+# Logs & Cache
+*.log
+__pycache__/
+.DS_Store

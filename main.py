@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+import datetime
+import requests
+
+try:
+    import oci
+except ImportError:
+    print("[ERROR] Опитайте да инсталирате библиотеките с: pip install -r requirements.txt")
+    sys.exit(1)
+
+CONFIG_FILE = "config.json"
+
+def log(msg, level="INFO"):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    prefix = {
+        "INFO": "[ℹ️ INFO]",
+        "SUCCESS": "[✅ SUCCESS]",
+        "WARN": "[⚠️ WARN]",
+        "ERROR": "[❌ ERROR]"
+    }.get(level, "[LOG]")
+    print(f"{timestamp} {prefix} {msg}", flush=True)
+
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        log(f"Файлът '{CONFIG_FILE}' не е намерен! Копирайте 'config.example.json' като '{CONFIG_FILE}' и попълнете вашите OCIDs.", "ERROR")
+        sys.exit(1)
+    
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    # Validate essential fields
+    required = ["user_ocid", "tenancy_ocid", "fingerprint", "key_file_path", "subnet_ocid", "image_ocid", "ssh_public_key"]
+    missing = [req for req in required if not cfg.get(req) or cfg[req].startswith("ocid1...") or "aaaaaaa" in cfg[req]]
+    
+    if missing:
+        log(f"Моля попълнете валидни стойности за следните полета в {CONFIG_FILE}: {', '.join(missing)}", "ERROR")
+        sys.exit(1)
+        
+    return cfg
+
+def send_notification(cfg, title, message):
+    log(f"Изпращане на нотификация: {title} - {message}", "INFO")
+    
+    # Telegram Notification
+    tg_token = cfg.get("telegram_bot_token")
+    tg_chat = cfg.get("telegram_chat_id")
+    if tg_token and tg_chat:
+        try:
+            url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+            payload = {"chat_id": tg_chat, "text": f"🎉 {title}\n\n{message}"}
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            log(f"Грешка при изпращане на Telegram съобщение: {e}", "WARN")
+
+    # Discord Webhook Notification
+    discord_url = cfg.get("discord_webhook_url")
+    if discord_url:
+        try:
+            payload = {"content": f"🎉 **{title}**\n{message}"}
+            requests.post(discord_url, json=payload, timeout=10)
+        except Exception as e:
+            log(f"Грешка при изпращане на Discord съобщение: {e}", "WARN")
+
+def get_oci_config(cfg):
+    key_path = os.path.expanduser(cfg["key_file_path"])
+    if not os.path.exists(key_path):
+        log(f"Файлът с частния API ключ не съществува на път: {key_path}", "ERROR")
+        sys.exit(1)
+
+    oci_cfg = {
+        "user": cfg["user_ocid"],
+        "key_file": key_path,
+        "fingerprint": cfg["fingerprint"],
+        "tenancy": cfg["tenancy_ocid"],
+        "region": cfg.get("region", "eu-frankfurt-1")
+    }
+    oci.config.validate_config(oci_cfg)
+    return oci_cfg
+
+def get_availability_domains(identity_client, compartment_ocid):
+    try:
+        ads_response = identity_client.list_availability_domains(compartment_ocid)
+        ads = [ad.name for ad in ads_response.data]
+        if ads:
+            return ads
+    except Exception as e:
+        log(f"Не успя да извлече ADs чрез API, преминаване към стандартните за Франкфурт: {e}", "WARN")
+    
+    # Fallback for Frankfurt
+    return [
+        "gVig:EU-FRANKFURT-1-AD-1",
+        "gVig:EU-FRANKFURT-1-AD-2",
+        "gVig:EU-FRANKFURT-1-AD-3"
+    ]
+
+def try_launch_instance(compute_client, ad, cfg):
+    compartment_ocid = cfg.get("compartment_ocid") or cfg["tenancy_ocid"]
+    ocpus = float(cfg.get("ocpus", 4))
+    memory_in_gbs = float(cfg.get("memory_in_gbs", 24))
+    display_name = cfg.get("display_name", "oracle-arm-instance")
+    boot_volume_size = int(cfg.get("boot_volume_size_in_gbs", 50))
+    
+    launch_details = oci.core.models.LaunchInstanceDetails(
+        compartment_id=compartment_ocid,
+        availability_domain=ad,
+        display_name=display_name,
+        shape="VM.Standard.A1.Flex",
+        shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(
+            ocpus=ocpus,
+            memory_in_gbs=memory_in_gbs
+        ),
+        source_details=oci.core.models.InstanceSourceViaImageDetails(
+            image_id=cfg["image_ocid"],
+            boot_volume_size_in_gbs=boot_volume_size
+        ),
+        create_vnic_details=oci.core.models.CreateVnicDetails(
+            subnet_id=cfg["subnet_ocid"],
+            assign_public_ip=True
+        ),
+        metadata={
+            "ssh_authorized_keys": cfg["ssh_public_key"].strip()
+        }
+    )
+    
+    response = compute_client.launch_instance(launch_details)
+    return response.data
+
+def main():
+    log("=== Стартиране на Oracle Free Tier Auto-Retry script ===", "INFO")
+    cfg = load_config()
+    oci_cfg = get_oci_config(cfg)
+    
+    identity_client = oci.identity.IdentityClient(oci_cfg)
+    compute_client = oci.core.ComputeClient(oci_cfg)
+    
+    compartment_ocid = cfg.get("compartment_ocid") or cfg["tenancy_ocid"]
+    
+    log(f"Извличане на Availability Domains за регион {oci_cfg['region']}...", "INFO")
+    ads = get_availability_domains(identity_client, compartment_ocid)
+    log(f"Намерени Availability Domains: {', '.join(ads)}", "INFO")
+    
+    interval = int(cfg.get("retry_interval_seconds", 600))
+    attempt = 0
+    
+    while True:
+        attempt += 1
+        log(f"--- Опит #{attempt} ---", "INFO")
+        
+        created_instance = None
+        for ad in ads:
+            log(f"Опит за създаване на машина в AD: {ad}...", "INFO")
+            try:
+                created_instance = try_launch_instance(compute_client, ad, cfg)
+                log(f"🎉 УСПЕХ! Машината беше създадена успешно в {ad}!", "SUCCESS")
+                log(f"Instance ID: {created_instance.id}", "SUCCESS")
+                log(f"Display Name: {created_instance.display_name}", "SUCCESS")
+                
+                send_notification(
+                    cfg,
+                    "Oracle Cloud VM Created Successfully!",
+                    f"Машината '{created_instance.display_name}' беше създадена в {ad}.\nInstance ID: {created_instance.id}"
+                )
+                return
+            except oci.exceptions.ServiceError as se:
+                # Capacity errors / HTTP 500 / OutOfCapacity / TooManyRequests
+                if se.status in [500, 429] or "capacity" in se.message.lower() or "outofcapacity" in se.code.lower():
+                    log(f"Няма свободен капацитет в {ad} ({se.code}: {se.message.strip()})", "WARN")
+                elif se.status == 400 and "limit" in se.message.lower():
+                    log(f"Достигнат лимит на акаунта или ресурсите: {se.message}", "ERROR")
+                    send_notification(cfg, "Oracle Script Error", f"Лимит на ресурсите: {se.message}")
+                    sys.exit(1)
+                else:
+                    log(f"Грешка от OCI API при опит в {ad}: status={se.status}, code={se.code}, message={se.message}", "ERROR")
+            except Exception as e:
+                log(f"Възникна непредвидена грешка при опит в {ad}: {e}", "ERROR")
+        
+        log(f"Всички AD-та са без свободен капацитет в момента. Изчакване {interval} секунди (10 минути)...", "INFO")
+        time.sleep(interval)
+
+if __name__ == "__main__":
+    main()
