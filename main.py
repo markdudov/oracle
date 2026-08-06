@@ -176,7 +176,8 @@ def main():
     log(f"Availability Domains ({oci_cfg['region']}): {', '.join(ads)}", "INFO")
     
     single_run = os.getenv("SINGLE_RUN") == "true" or os.getenv("GITHUB_ACTIONS") == "true"
-    max_loops = 16 if single_run else sys.maxsize
+    max_loops = 10 if single_run else sys.maxsize
+
     interval = int(cfg.get("retry_interval_seconds", 600))
     
     attempt = 0
