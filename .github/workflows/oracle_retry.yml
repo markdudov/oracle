@@ -1,6 +1,8 @@
 name: Oracle Cloud Free Tier Auto-Retry
 
 on:
+  schedule:
+    - cron: '15,45 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -38,15 +40,15 @@ jobs:
         run: |
           python main.py
 
-      - name: Dispatch Next Run (Reliable Green Chain)
-        if: always() && steps.retry.outcome == 'success'
+      - name: Dispatch Next Run (Unstoppable Chain)
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -f /tmp/vm_created ]; then
             echo "🎉 VM created or already exists! Stopping auto-loop."
           else
-            echo "🔄 VM not created yet. Dispatching next workflow run..."
+            echo "🔄 Dispatching next workflow run..."
             sleep 10
-            gh workflow run oracle_retry.yml --repo ${{ github.repository }}
+            gh workflow run oracle_retry.yml --repo ${{ github.repository }} || true
           fi
