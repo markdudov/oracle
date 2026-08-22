@@ -31,6 +31,10 @@ According to Oracle Cloud's Always Free policy, instances are considered idle an
 
 To keep your machine active while you decide what projects to deploy, use the **Anti-Idle Keep-Alive Service**. It maintains **~5.5 GB RAM (~24% of 24 GB)** and a light continuous CPU pulse without overheating the server.
 
+> **💡 Best Practice - Script Location (`/opt/` Directory):**  
+> In standard Linux filesystem architecture (FHS), standalone system scripts and background daemons should always be placed in `/opt/` (e.g. `/opt/oracle_keepalive.py`).  
+> This keeps your user home directory (`/home/ubuntu`) completely clean for your actual projects, prevents accidental file deletion, and allows systemd to access the script on boot prior to user login.
+
 ---
 
 ### 📋 Option 1: Quick Install (Copy & Paste 1 Command)
