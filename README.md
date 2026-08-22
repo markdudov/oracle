@@ -14,13 +14,13 @@ Complete toolkit, automation scripts, and management guides for creating, mainta
 | **Processors (OCPU)** | **4.0 OCPU** (Ampere Altra ARM A1) |
 | **Memory (RAM)** | **24.0 GB RAM** |
 | **Storage (NVMe/SSD)** | **200.0 GB** |
-| **Public IP Address** | 🔒 **`130.162.229.179`** *(Reserved Static IP)* |
+| **Public IP Address** | 🔒 `<YOUR_RESERVED_STATIC_IP>` |
 | **Operating System** | Canonical Ubuntu 24.04 LTS (`aarch64`) |
 
 ### 🔑 SSH Connection
 Connect securely to your server from your terminal:
 ```bash
-ssh -i ~/.ssh/id_ed25519_oracle ubuntu@130.162.229.179
+ssh -i ~/.ssh/id_ed25519_oracle ubuntu@<YOUR_SERVER_IP>
 ```
 
 ---
@@ -37,7 +37,7 @@ To keep your machine active while you decide what projects to deploy, use the **
 
 Connect to your instance via SSH:
 ```bash
-ssh -i ~/.ssh/id_ed25519_oracle ubuntu@130.162.229.179
+ssh -i ~/.ssh/id_ed25519_oracle ubuntu@<YOUR_SERVER_IP>
 ```
 
 Paste this entire block into your terminal:
