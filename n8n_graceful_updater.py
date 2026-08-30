@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-n8n Graceful Auto-Updater for Coolify & PostgreSQL
-- Checks if any n8n executions are currently in 'running' state in PostgreSQL.
-- Gracefully waits until all active executions finish before updating.
-- Pulls latest Docker images (n8nio/n8n:latest & n8nio/runners:latest).
-- Recreates containers and validates healthcheck.
-- Logs full output to /var/log/n8n_updater.log.
+n8n Intelligent Graceful Auto-Updater
+- Ensures n8n is updated once per calendar month.
+- Checks PostgreSQL if any workflows are in "running" state.
+- If ANY workflow is running (even for hours/days): DOES NOT touch or restart n8n!
+- Retries every hour until it finds a clean window with 0 active executions.
+- Once clean (0 running), updates to latest n8n version seamlessly.
 """
 
 import datetime
+import os
 import subprocess
 import sys
 import time
@@ -19,8 +20,7 @@ COMPOSE_FILE = f"{COMPOSE_DIR}/docker-compose.yml"
 ENV_FILE = f"{COMPOSE_DIR}/.env"
 POSTGRES_CONTAINER = f"postgres-{SERVICE_UUID}"
 LOG_FILE = "/var/log/n8n_updater.log"
-MAX_WAIT_SECONDS = 300  # 5 minutes maximum wait for running jobs
-CHECK_INTERVAL = 15  # Check every 15 seconds
+STATE_FILE = "/var/log/n8n_last_update_month.txt"
 
 
 def log(message):
@@ -32,6 +32,28 @@ def log(message):
       f.write(entry + "\n")
   except Exception as e:
     print(f"Error writing to log: {e}")
+
+
+def is_already_updated_this_month():
+  current_month = datetime.datetime.now().strftime("%Y-%m")
+  if os.path.exists(STATE_FILE):
+    try:
+      with open(STATE_FILE, "r") as f:
+        last_month = f.read().strip()
+        if last_month == current_month:
+          return True
+    except Exception:
+      pass
+  return False
+
+
+def mark_updated_this_month():
+  current_month = datetime.datetime.now().strftime("%Y-%m")
+  try:
+    with open(STATE_FILE, "w") as f:
+      f.write(current_month + "\n")
+  except Exception as e:
+    log(f"Error saving state file: {e}")
 
 
 def get_running_executions():
@@ -111,41 +133,33 @@ def perform_update():
 
   if health_ok:
     log("✅ SUCCESS: n8n has been successfully updated and is healthy!")
+    mark_updated_this_month()
     return True
   else:
     log("✅ Container started successfully.")
+    mark_updated_this_month()
     return True
 
 
 def main():
+  if is_already_updated_this_month():
+    # Already updated for this calendar month, nothing to do
+    return
+
   log("==================================================")
-  log("🚀 Starting n8n Graceful Auto-Updater check...")
+  log("🚀 n8n Monthly Update Check...")
 
-  waited = 0
-  while waited < MAX_WAIT_SECONDS:
-    running_count = get_running_executions()
-    if running_count == 0:
-      log("✅ 0 running executions detected. Safe to update now.")
-      break
-    else:
-      log(
-          f"⏳ Found {running_count} active execution(s) running. Waiting"
-          f" {CHECK_INTERVAL}s before re-checking (Waited {waited}s /"
-          f" {MAX_WAIT_SECONDS}s)..."
-      )
-      time.sleep(CHECK_INTERVAL)
-      waited += CHECK_INTERVAL
-
-  if waited >= MAX_WAIT_SECONDS:
+  running_count = get_running_executions()
+  if running_count > 0:
     log(
-        "⚠️ Warning: Active executions did not finish within timeout. Postponing"
-        " update."
+        f"⏳ Found {running_count} active execution(s) currently running."
+        " Skipping update safely to avoid interruption. Will re-check next"
+        " hour."
     )
-    sys.exit(1)
+    sys.exit(0)
 
-  success = perform_update()
-  if not success:
-    sys.exit(1)
+  log("✅ 0 running executions detected. Safe to perform monthly update now.")
+  perform_update()
 
 
 if __name__ == "__main__":
