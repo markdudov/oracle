@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Production Reoon Email Verification & SalesBlink Synchronization Pipeline
-- Fetches 1,200 unverified leads from PostgreSQL leads_pipeline table.
+- Dynamically checks available Reoon Daily Credits.
+- Fetches EXACTLY the number of available daily credits from PostgreSQL.
 - Submits bulk verification task to Reoon Email Verifier API.
 - Polls for completion, updates PostgreSQL with statuses & scores.
 - Pushes SAFE verified leads directly to SalesBlink list: "SilenceTrimmer Youtubers Contacts".
@@ -24,7 +25,7 @@ SALESBLINK_API_KEY = (
 )
 POSTGRES_CONTAINER = "postgres-qk8flfhcjjhydu5hkxdplp0n"
 LOG_FILE = "/var/log/reoon_salesblink_pipeline.log"
-DAILY_LIMIT = 1200
+DEFAULT_DAILY_LIMIT = 1200
 
 
 def log(msg):
@@ -52,6 +53,24 @@ def get_reoon_api_key():
   return ""
 
 
+def get_remaining_daily_credits(api_key):
+  url = (
+      "https://emailverifier.reoon.com/api/v1/check-account-balance/?key="
+      + api_key
+  )
+  try:
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+      res = json.loads(resp.read().decode("utf-8"))
+      credits = res.get("remaining_daily_credits")
+      if credits is not None:
+        log(f"💳 Reoon Account Balance: {credits} Daily Credits remaining.")
+        return int(credits)
+  except Exception as e:
+    log(f"⚠️ Warning querying Reoon balance: {e}. Falling back to default.")
+  return DEFAULT_DAILY_LIMIT
+
+
 def run_psql(sql):
   cmd = [
       "docker",
@@ -71,7 +90,9 @@ def run_psql(sql):
   return res.stdout.strip()
 
 
-def fetch_unverified_leads(limit=DAILY_LIMIT):
+def fetch_unverified_leads(limit):
+  if limit <= 0:
+    return []
   sql = f"""
     SELECT json_agg(t) FROM (
         SELECT id, email, first_name, channel_name, niche, country, country_code, language, subscribers, recent_video_title, channel_url, source
@@ -197,7 +218,16 @@ def main():
     )
     sys.exit(1)
 
-  leads = fetch_unverified_leads(DAILY_LIMIT)
+  # Check exact remaining daily credits dynamically
+  available_credits = get_remaining_daily_credits(api_key)
+  if available_credits <= 0:
+    log("ℹ️ 0 Daily Credits remaining for today. Will run tomorrow.")
+    return
+
+  batch_size = min(available_credits, DEFAULT_DAILY_LIMIT)
+  log(f"🎯 Target verification batch size for today: {batch_size} emails.")
+
+  leads = fetch_unverified_leads(batch_size)
   if not leads:
     log("🎉 All 100,000 leads in the pipeline have already been verified!")
     return
