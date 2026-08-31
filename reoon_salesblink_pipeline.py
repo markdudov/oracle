@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Production Reoon Email Verification & SalesBlink Synchronization Pipeline
-- Dynamically checks available Reoon Daily Credits.
+- Iteratively drains ALL available Reoon Daily Credits (Multi-Pass Auto-Drain).
 - Fetches EXACTLY the number of available daily credits from PostgreSQL.
 - Submits bulk verification task to Reoon Email Verifier API.
 - Polls for completion, updates PostgreSQL with statuses & scores.
+- Automatically repeats if Reoon refunds non-billable emails (e.g. unknown/syntax), ensuring 100% of daily credits are utilized every single day.
 - Pushes SAFE verified leads directly to SalesBlink list: "SilenceTrimmer Youtubers Contacts" via SalesBlink MCP API.
 - Marks synced leads in PostgreSQL with timestamps.
 """
@@ -26,6 +27,7 @@ SALESBLINK_API_KEY = (
 POSTGRES_CONTAINER = "postgres-qk8flfhcjjhydu5hkxdplp0n"
 LOG_FILE = "/var/log/reoon_salesblink_pipeline.log"
 DEFAULT_DAILY_LIMIT = 1200
+MIN_CREDIT_THRESHOLD = 2  # Stop draining if fewer than 2 credits remain
 
 
 def log(msg):
@@ -282,35 +284,11 @@ def sync_pending_safe_leads_to_salesblink():
   return pushed_count
 
 
-def run_pipeline():
-  log("==================================================")
-  log("🚀 Starting Daily Reoon Verification & SalesBlink Sync Pipeline...")
-
-  api_key = get_reoon_api_key()
-  if not api_key:
-    log(
-        "❌ Error: Reoon API key not found in /etc/reoon_config.json or"
-        " REOON_API_KEY env."
-    )
-    sys.exit(1)
-
-  # Check exact remaining daily credits dynamically
-  available_credits = get_remaining_daily_credits(api_key)
-  if available_credits <= 0:
-    log(
-        "ℹ️ 0 Daily Credits remaining for today. Syncing any pending safe leads."
-    )
-    sync_pending_safe_leads_to_salesblink()
-    return {"status": "no_credits_today", "processed": 0}
-
-  batch_size = min(available_credits, DEFAULT_DAILY_LIMIT)
-  log(f"🎯 Target verification batch size for today: {batch_size} emails.")
-
+def process_single_batch(api_key, batch_size):
   leads = fetch_unverified_leads(batch_size)
   if not leads:
     log("🎉 All 100,000 leads in the pipeline have already been verified!")
-    sync_pending_safe_leads_to_salesblink()
-    return {"status": "all_completed", "processed": 0}
+    return {"status": "all_completed", "verified": 0, "safe": 0}
 
   log(f"📋 Fetched {len(leads)} unverified leads from PostgreSQL.")
   emails = [l["email"] for l in leads]
@@ -320,7 +298,7 @@ def run_pipeline():
   task_id = task_res.get("task_id") or task_res.get("id")
   if not task_id:
     log(f"❌ Error creating Reoon task: {task_res}")
-    sys.exit(1)
+    return {"status": "error", "verified": 0, "safe": 0}
 
   log(
       "✅ Reoon task created successfully! Task ID:"
@@ -399,18 +377,64 @@ def run_pipeline():
         f"🎉 Successfully synced {pushed_count} verified leads to SalesBlink"
         " list: SilenceTrimmer Youtubers Contacts!"
     )
-  else:
-    log("ℹ️ No safe leads found in this batch to sync.")
 
-  # Also sync any previous pending
+  return {
+      "status": "success",
+      "verified": verified_count,
+      "safe": safe_count,
+      "pushed": pushed_count,
+  }
+
+
+def run_pipeline():
+  log("==================================================")
+  log(
+      "🚀 Starting Multi-Pass Auto-Drain Reoon Verification & SalesBlink"
+      " Pipeline..."
+  )
+
+  api_key = get_reoon_api_key()
+  if not api_key:
+    log(
+        "❌ Error: Reoon API key not found in /etc/reoon_config.json or"
+        " REOON_API_KEY env."
+    )
+    sys.exit(1)
+
+  pass_num = 1
+  max_passes = 5
+  total_verified_all_passes = 0
+  total_safe_all_passes = 0
+
+  while pass_num <= max_passes:
+    available_credits = get_remaining_daily_credits(api_key)
+    if available_credits < MIN_CREDIT_THRESHOLD:
+      log(
+          f"✨ Only {available_credits} credits remaining (< {MIN_CREDIT_THRESHOLD})."
+          " Daily credits fully drained!"
+      )
+      break
+
+    batch_size = min(available_credits, DEFAULT_DAILY_LIMIT)
+    log(f"🎯 [Pass {pass_num}] Target verification batch size: {batch_size} emails.")
+
+    res = process_single_batch(api_key, batch_size)
+    if res.get("status") == "all_completed":
+      break
+
+    total_verified_all_passes += res.get("verified", 0)
+    total_safe_all_passes += res.get("safe", 0)
+    pass_num += 1
+    time.sleep(2)
+
+  # Final safety check: sync any pending verified safe leads
   sync_pending_safe_leads_to_salesblink()
 
   log("🏁 Pipeline run completed successfully!")
   return {
       "status": "success",
-      "verified": verified_count,
-      "safe": safe_count,
-      "pushed_to_salesblink": pushed_count,
+      "total_verified": total_verified_all_passes,
+      "total_safe": total_safe_all_passes,
   }
 
 
