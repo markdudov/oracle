@@ -5,9 +5,9 @@ Production Reoon Email Verification & SalesBlink Synchronization Pipeline
 - Fetches EXACTLY the number of available daily credits from PostgreSQL.
 - Submits bulk verification task to Reoon Email Verifier API.
 - Polls for completion, updates PostgreSQL with statuses & scores.
-- Automatically repeats if Reoon refunds non-billable emails (e.g. unknown/syntax), ensuring 100% of daily credits are utilized every single day.
-- Pushes SAFE verified leads directly to SalesBlink list: "SilenceTrimmer Youtubers Contacts" via SalesBlink MCP API.
-- Marks synced leads in PostgreSQL with timestamps.
+- Pushes SAFE verified leads directly to SalesBlink via Official REST API:
+  POST https://run.salesblink.io/api/public/v1.0.0/contacts
+- Marks synced leads in PostgreSQL with timestamps ONLY on successful HTTP 200 push.
 """
 
 import datetime
@@ -24,10 +24,11 @@ SALESBLINK_LIST_ID = "034f362a-1a45-4d61-84ed-4bdb7f2d9405"
 SALESBLINK_API_KEY = (
     "key-65ff93901953f8484edafdb5fffc0f73a1019c9fd9a9e4e91994450d9a9a44e0"
 )
+SALESBLINK_API_URL = "https://run.salesblink.io/api/public/v1.0.0/contacts"
 POSTGRES_CONTAINER = "postgres-qk8flfhcjjhydu5hkxdplp0n"
 LOG_FILE = "/var/log/reoon_salesblink_pipeline.log"
 DEFAULT_DAILY_LIMIT = 1200
-MIN_CREDIT_THRESHOLD = 2  # Stop draining if fewer than 2 credits remain
+MIN_CREDIT_THRESHOLD = 2
 
 
 def log(msg):
@@ -164,74 +165,40 @@ def push_to_salesblink(contacts):
   if not contacts:
     return 0
 
-  mcp_url = f"https://mcp.salesblink.io/mcp?api_key={SALESBLINK_API_KEY}"
-  headers = {
-      "Content-Type": "application/json",
-      "Accept": "application/json, text/event-stream",
-  }
-
   total_synced = 0
-  chunk_size = 250
+  chunk_size = 400
 
   for i in range(0, len(contacts), chunk_size):
     chunk = contacts[i : i + chunk_size]
-
-    # Initialize MCP Session
-    init_payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "n8n-pipeline", "version": "1.0.0"},
-        },
+    payload = {
+        "list_id": SALESBLINK_LIST_ID,
+        "remove_duplicates": True,
+        "contacts": chunk,
     }
-
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        SALESBLINK_API_URL,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": SALESBLINK_API_KEY,
+        },
+        method="POST",
+    )
     try:
-      init_req = urllib.request.Request(
-          mcp_url, data=json.dumps(init_payload).encode("utf-8"), headers=headers
-      )
-      with urllib.request.urlopen(init_req, timeout=20) as init_resp:
-        session_id = init_resp.headers.get("Mcp-Session-Id")
-
-      # Call add_contacts tool
-      call_payload = {
-          "jsonrpc": "2.0",
-          "id": 2,
-          "method": "tools/call",
-          "params": {
-              "name": "add_contacts",
-              "arguments": {
-                  "list_id": SALESBLINK_LIST_ID,
-                  "remove_duplicates": True,
-                  "contacts": chunk,
-              },
-          },
-      }
-
-      call_headers = {
-          "Content-Type": "application/json",
-          "Accept": "application/json, text/event-stream",
-      }
-      if session_id:
-        call_headers["Mcp-Session-Id"] = session_id
-
-      call_req = urllib.request.Request(
-          mcp_url,
-          data=json.dumps(call_payload).encode("utf-8"),
-          headers=call_headers,
-      )
-      with urllib.request.urlopen(call_req, timeout=45) as call_resp:
-        synced_count = len(chunk)
-        total_synced += synced_count
-        log(
-            f"✅ Pushed batch of {synced_count} SAFE contacts to SalesBlink list"
-            f" {SALESBLINK_LIST_ID}!"
-        )
-
+      with urllib.request.urlopen(req, timeout=45) as resp:
+        res = json.loads(resp.read().decode("utf-8"))
+        if res.get("success") is True or resp.status == 200:
+          synced_count = len(chunk)
+          total_synced += synced_count
+          log(
+              f"✅ Pushed batch of {synced_count} SAFE contacts to SalesBlink"
+              f" list {SALESBLINK_LIST_ID}!"
+          )
+        else:
+          log(f"⚠️ SalesBlink API returned unexpected response: {res}")
     except Exception as e:
-      log(f"⚠️ SalesBlink sync error for batch: {e}")
+      log(f"⚠️ SalesBlink REST sync error for batch: {e}")
 
   return total_synced
 
@@ -275,12 +242,13 @@ def sync_pending_safe_leads_to_salesblink():
       " SalesBlink..."
   )
   pushed_count = push_to_salesblink(safe_leads)
-  emails = [l["email"] for l in safe_leads]
-  mark_leads_salesblink_synced(emails)
-  log(
-      f"🎉 Successfully synced {pushed_count} SAFE contacts to SalesBlink list:"
-      " SilenceTrimmer Youtubers Contacts!"
-  )
+  if pushed_count > 0:
+    emails = [l["email"] for l in safe_leads[:pushed_count]]
+    mark_leads_salesblink_synced(emails)
+    log(
+        f"🎉 Successfully synced {pushed_count} SAFE contacts to SalesBlink"
+        " list: SilenceTrimmer Youtubers Contacts!"
+    )
   return pushed_count
 
 
@@ -372,11 +340,12 @@ def process_single_batch(api_key, batch_size):
         " SalesBlink..."
     )
     pushed_count = push_to_salesblink(safe_leads_for_salesblink)
-    mark_leads_salesblink_synced(safe_emails)
-    log(
-        f"🎉 Successfully synced {pushed_count} verified leads to SalesBlink"
-        " list: SilenceTrimmer Youtubers Contacts!"
-    )
+    if pushed_count > 0:
+      mark_leads_salesblink_synced(safe_emails[:pushed_count])
+      log(
+          f"🎉 Successfully synced {pushed_count} verified leads to SalesBlink"
+          " list: SilenceTrimmer Youtubers Contacts!"
+      )
 
   return {
       "status": "success",
@@ -410,13 +379,16 @@ def run_pipeline():
     available_credits = get_remaining_daily_credits(api_key)
     if available_credits < MIN_CREDIT_THRESHOLD:
       log(
-          f"✨ Only {available_credits} credits remaining (< {MIN_CREDIT_THRESHOLD})."
-          " Daily credits fully drained!"
+          f"✨ Only {available_credits} credits remaining"
+          f" (< {MIN_CREDIT_THRESHOLD}). Daily credits fully drained!"
       )
       break
 
     batch_size = min(available_credits, DEFAULT_DAILY_LIMIT)
-    log(f"🎯 [Pass {pass_num}] Target verification batch size: {batch_size} emails.")
+    log(
+        f"🎯 [Pass {pass_num}] Target verification batch size: {batch_size}"
+        " emails."
+    )
 
     res = process_single_batch(api_key, batch_size)
     if res.get("status") == "all_completed":
